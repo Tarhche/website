@@ -9,3 +9,6 @@ down:
 
 sh%:
 	docker compose exec -it $* sh
+
+logs%:
+	docker compose logs -f $*
