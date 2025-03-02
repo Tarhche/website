@@ -73,6 +73,12 @@ import (
 	"github.com/khanzadimahdi/testproject/application/dashboard/user/userchangepassword"
 	getFile "github.com/khanzadimahdi/testproject/application/file/getFile"
 	"github.com/khanzadimahdi/testproject/application/home"
+	createtask "github.com/khanzadimahdi/testproject/application/runner/manager/task/createTask"
+	deletetask "github.com/khanzadimahdi/testproject/application/runner/manager/task/deleteTask"
+	gettask "github.com/khanzadimahdi/testproject/application/runner/manager/task/getTask"
+	gettasks "github.com/khanzadimahdi/testproject/application/runner/manager/task/getTasks"
+	runtask "github.com/khanzadimahdi/testproject/application/runner/manager/task/runTask"
+	stoptask "github.com/khanzadimahdi/testproject/application/runner/manager/task/stopTask"
 	"github.com/khanzadimahdi/testproject/domain"
 	"github.com/khanzadimahdi/testproject/infrastructure/crypto/argon2"
 	"github.com/khanzadimahdi/testproject/infrastructure/crypto/ecdsa"
@@ -87,6 +93,7 @@ import (
 	filesrepository "github.com/khanzadimahdi/testproject/infrastructure/repository/mongodb/files"
 	permissionsrepository "github.com/khanzadimahdi/testproject/infrastructure/repository/mongodb/permissions"
 	rolesrepository "github.com/khanzadimahdi/testproject/infrastructure/repository/mongodb/roles"
+	taskrepository "github.com/khanzadimahdi/testproject/infrastructure/repository/mongodb/runner/tasks"
 	userrepository "github.com/khanzadimahdi/testproject/infrastructure/repository/mongodb/users"
 	"github.com/khanzadimahdi/testproject/infrastructure/storage/minio"
 	"github.com/khanzadimahdi/testproject/infrastructure/template"
@@ -109,6 +116,7 @@ import (
 	fileAPI "github.com/khanzadimahdi/testproject/presentation/http/api/file"
 	hashtagAPI "github.com/khanzadimahdi/testproject/presentation/http/api/hashtag"
 	homeapi "github.com/khanzadimahdi/testproject/presentation/http/api/home"
+	taskAPI "github.com/khanzadimahdi/testproject/presentation/http/api/runner/manager/task"
 	"github.com/khanzadimahdi/testproject/presentation/http/middleware"
 	"github.com/khanzadimahdi/testproject/resources/translation"
 	"github.com/nats-io/nats.go"
@@ -172,6 +180,7 @@ func App(ctx context.Context) (http.Handler, func()) {
 	rolesRepository := rolesrepository.NewRepository(database)
 	bookmarkRepository := bookmarksrepository.NewRepository(database)
 	configRepository := configrepository.NewRepository(database)
+	taskRepository := taskrepository.NewRepository(database)
 
 	privateKeyData := []byte(os.Getenv("PRIVATE_KEY"))
 	privateKey, err := ecdsa.ParsePrivateKey(privateKeyData)
@@ -312,6 +321,13 @@ func App(ctx context.Context) (http.Handler, func()) {
 	dashboardGetConfigUsecase := dashboardGetConfig.NewUseCase(configRepository)
 	dashboardUpdateConfigUsecase := dashboardUpdateConfig.NewUseCase(configRepository, validator)
 
+	createTaskUseCase := createtask.NewUseCase(taskRepository, validator)
+	deleteTaskUseCase := deletetask.NewUseCase(taskRepository, translator)
+	runTaskUseCase := runtask.NewUseCase(taskRepository, publishSubscriber, translator)
+	stopTaskUseCase := stoptask.NewUseCase(taskRepository, publishSubscriber, translator)
+	getTaskUseCase := gettask.NewUseCase(taskRepository)
+	getTasksUseCase := gettasks.NewUseCase(taskRepository)
+
 	// profile
 	mux.Handle("GET /api/dashboard/profile", middleware.NewAuthoriseMiddleware(profile.NewGetProfileHandler(getProfileUseCase), j, userRepository))
 	mux.Handle("PUT /api/dashboard/profile", middleware.NewAuthoriseMiddleware(profile.NewUpdateProfileHandler(updateProfileUseCase), j, userRepository))
@@ -380,6 +396,14 @@ func App(ctx context.Context) (http.Handler, func()) {
 	// config
 	mux.Handle("GET /api/dashboard/config", middleware.NewAuthoriseMiddleware(dashboardConfigAPI.NewShowHandler(dashboardGetConfigUsecase, authorization), j, userRepository))
 	mux.Handle("PUT /api/dashboard/config", middleware.NewAuthoriseMiddleware(dashboardConfigAPI.NewUpdateHandler(dashboardUpdateConfigUsecase, authorization), j, userRepository))
+
+	// runner/manager
+	mux.Handle("GET /api/runner/manager/tasks", taskAPI.NewIndexHandler(getTasksUseCase))
+	mux.Handle("POST /api/runner/manager/tasks", taskAPI.NewCreateHandler(createTaskUseCase))
+	mux.Handle("GET /api/runner/manager/tasks/{uuid}", taskAPI.NewShowHandler(getTaskUseCase))
+	mux.Handle("DELETE /api/runner/manager/tasks/{uuid}", taskAPI.NewDeleteHandler(deleteTaskUseCase))
+	mux.Handle("POST /api/runner/manager/tasks/{uuid}/run", taskAPI.NewRunHandler(runTaskUseCase))
+	mux.Handle("POST /api/runner/manager/tasks/{uuid}/stop", taskAPI.NewStopHandler(stopTaskUseCase))
 
 	return middleware.NewCORSMiddleware(middleware.NewRateLimitMiddleware(mux, 600, 1*time.Minute)), publishSubscriber.Wait
 }

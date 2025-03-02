@@ -15,6 +15,7 @@ import (
 type publishSubscriber struct {
 	connection *nats.Conn
 	jetstream  jetstream.JetStream
+	streams    map[string]jetstream.Stream
 	lock       sync.RWMutex
 	wg         sync.WaitGroup
 }
@@ -36,26 +37,24 @@ func NewPublishSubscriber(connection *nats.Conn) (*publishSubscriber, error) {
 	s := &publishSubscriber{
 		connection: connection,
 		jetstream:  j,
+		streams:    make(map[string]jetstream.Stream),
 	}
 
 	return s, nil
 }
 
 func (m *publishSubscriber) Publish(ctx context.Context, subject string, payload []byte) error {
+	if _, err := m.makeSureStreamExists(ctx, subject); err != nil {
+		return err
+	}
+
 	_, err := m.jetstream.Publish(ctx, subject, payload)
 
 	return err
 }
 
 func (m *publishSubscriber) Subscribe(ctx context.Context, ID string, subject string, handler domain.MessageHandler) error {
-	m.lock.Lock()
-	defer m.lock.Unlock()
-
-	stream, err := m.jetstream.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-		Name:     subject,
-		Subjects: []string{subject},
-	})
-
+	stream, err := m.makeSureStreamExists(ctx, subject)
 	if err != nil {
 		return err
 	}
@@ -114,4 +113,27 @@ func (m *publishSubscriber) consume(handler domain.MessageHandler) func(msg jets
 		_ = msg.DoubleAck(context.Background())
 		log.Printf("message Ack: %s\n", msg.Subject())
 	}
+}
+
+func (m *publishSubscriber) makeSureStreamExists(ctx context.Context, subject string) (jetstream.Stream, error) {
+	m.lock.RLock()
+	stream, ok := m.streams[subject]
+	m.lock.RUnlock()
+	if ok {
+		return stream, nil
+	}
+
+	stream, err := m.jetstream.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:     subject,
+		Subjects: []string{subject},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	m.streams[subject] = stream
+
+	return stream, nil
 }
