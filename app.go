@@ -73,6 +73,17 @@ import (
 	"github.com/khanzadimahdi/testproject/application/dashboard/user/userchangepassword"
 	getFile "github.com/khanzadimahdi/testproject/application/file/getFile"
 	"github.com/khanzadimahdi/testproject/application/home"
+	getnode "github.com/khanzadimahdi/testproject/application/runner/manager/node/getNode"
+	getnodes "github.com/khanzadimahdi/testproject/application/runner/manager/node/getNodes"
+	createtask "github.com/khanzadimahdi/testproject/application/runner/manager/task/createTask"
+	deletetask "github.com/khanzadimahdi/testproject/application/runner/manager/task/deleteTask"
+	gettask "github.com/khanzadimahdi/testproject/application/runner/manager/task/getTask"
+	gettasks "github.com/khanzadimahdi/testproject/application/runner/manager/task/getTasks"
+	runtask "github.com/khanzadimahdi/testproject/application/runner/manager/task/runTask"
+	stoptask "github.com/khanzadimahdi/testproject/application/runner/manager/task/stopTask"
+	workergettasks "github.com/khanzadimahdi/testproject/application/runner/worker/task/getTasks"
+	workerruntask "github.com/khanzadimahdi/testproject/application/runner/worker/task/runTask"
+	workerstoptask "github.com/khanzadimahdi/testproject/application/runner/worker/task/stopTask"
 	"github.com/khanzadimahdi/testproject/domain"
 	"github.com/khanzadimahdi/testproject/infrastructure/crypto/argon2"
 	"github.com/khanzadimahdi/testproject/infrastructure/crypto/ecdsa"
@@ -87,7 +98,11 @@ import (
 	filesrepository "github.com/khanzadimahdi/testproject/infrastructure/repository/mongodb/files"
 	permissionsrepository "github.com/khanzadimahdi/testproject/infrastructure/repository/mongodb/permissions"
 	rolesrepository "github.com/khanzadimahdi/testproject/infrastructure/repository/mongodb/roles"
+	noderepository "github.com/khanzadimahdi/testproject/infrastructure/repository/mongodb/runner/nodes"
+	taskrepository "github.com/khanzadimahdi/testproject/infrastructure/repository/mongodb/runner/tasks"
 	userrepository "github.com/khanzadimahdi/testproject/infrastructure/repository/mongodb/users"
+	"github.com/khanzadimahdi/testproject/infrastructure/runner/container"
+	"github.com/khanzadimahdi/testproject/infrastructure/runner/scheduler/roundrobin"
 	"github.com/khanzadimahdi/testproject/infrastructure/storage/minio"
 	"github.com/khanzadimahdi/testproject/infrastructure/template"
 	"github.com/khanzadimahdi/testproject/infrastructure/translator"
@@ -109,6 +124,9 @@ import (
 	fileAPI "github.com/khanzadimahdi/testproject/presentation/http/api/file"
 	hashtagAPI "github.com/khanzadimahdi/testproject/presentation/http/api/hashtag"
 	homeapi "github.com/khanzadimahdi/testproject/presentation/http/api/home"
+	managerNodeAPI "github.com/khanzadimahdi/testproject/presentation/http/api/runner/manager/node"
+	managerTaskAPI "github.com/khanzadimahdi/testproject/presentation/http/api/runner/manager/task"
+	workerTaskAPI "github.com/khanzadimahdi/testproject/presentation/http/api/runner/worker/task"
 	"github.com/khanzadimahdi/testproject/presentation/http/middleware"
 	"github.com/khanzadimahdi/testproject/resources/translation"
 	"github.com/nats-io/nats.go"
@@ -172,6 +190,8 @@ func App(ctx context.Context) (http.Handler, func()) {
 	rolesRepository := rolesrepository.NewRepository(database)
 	bookmarkRepository := bookmarksrepository.NewRepository(database)
 	configRepository := configrepository.NewRepository(database)
+	taskRepository := taskrepository.NewRepository(database)
+	nodeRepository := noderepository.NewRepository(database)
 
 	privateKeyData := []byte(os.Getenv("PRIVATE_KEY"))
 	privateKey, err := ecdsa.ParsePrivateKey(privateKeyData)
@@ -193,6 +213,11 @@ func App(ctx context.Context) (http.Handler, func()) {
 		Host: os.Getenv("MAIL_SMTP_HOST"),
 		Port: os.Getenv("MAIL_SMTP_PORT"),
 	})
+
+	containerManager, err := container.NewDockerManager("tcp://docker:2375")
+	if err != nil {
+		panic(err)
+	}
 
 	if err := publishSubscriber.Subscribe(ctx, "0", forgetpassword.SendForgetPasswordEmailName, forgetpassword.NewSendForgetPasswordEmailHandler(userRepository, j, mailer, mailFromAddress, templateRenderer)); err != nil {
 		panic(err)
@@ -312,6 +337,20 @@ func App(ctx context.Context) (http.Handler, func()) {
 	dashboardGetConfigUsecase := dashboardGetConfig.NewUseCase(configRepository)
 	dashboardUpdateConfigUsecase := dashboardUpdateConfig.NewUseCase(configRepository, validator)
 
+	managerCreateTaskUseCase := createtask.NewUseCase(taskRepository, validator)
+	managerDeleteTaskUseCase := deletetask.NewUseCase(taskRepository, translator)
+	managerRunTaskUseCase := runtask.NewUseCase(taskRepository, nodeRepository, roundrobin.New(), publishSubscriber, translator)
+	managerStopTaskUseCase := stoptask.NewUseCase(taskRepository, publishSubscriber, translator)
+	managerGetTaskUseCase := gettask.NewUseCase(taskRepository)
+	managerGetTasksUseCase := gettasks.NewUseCase(taskRepository)
+
+	managerGetNodeUseCase := getnode.NewUseCase(nodeRepository)
+	managerGetNodesUseCase := getnodes.NewUseCase(nodeRepository)
+
+	workerGetTasksUseCase := workergettasks.NewUseCase(containerManager)
+	workerRunTaskUseCase := workerruntask.NewUseCase(containerManager, validator)
+	workerStopTaskUseCase := workerstoptask.NewUseCase(containerManager, validator)
+
 	// profile
 	mux.Handle("GET /api/dashboard/profile", middleware.NewAuthoriseMiddleware(profile.NewGetProfileHandler(getProfileUseCase), j, userRepository))
 	mux.Handle("PUT /api/dashboard/profile", middleware.NewAuthoriseMiddleware(profile.NewUpdateProfileHandler(updateProfileUseCase), j, userRepository))
@@ -380,6 +419,22 @@ func App(ctx context.Context) (http.Handler, func()) {
 	// config
 	mux.Handle("GET /api/dashboard/config", middleware.NewAuthoriseMiddleware(dashboardConfigAPI.NewShowHandler(dashboardGetConfigUsecase, authorization), j, userRepository))
 	mux.Handle("PUT /api/dashboard/config", middleware.NewAuthoriseMiddleware(dashboardConfigAPI.NewUpdateHandler(dashboardUpdateConfigUsecase, authorization), j, userRepository))
+
+	// runner/manager
+	mux.Handle("GET /api/runner/manager/tasks", managerTaskAPI.NewIndexHandler(managerGetTasksUseCase))
+	mux.Handle("POST /api/runner/manager/tasks", managerTaskAPI.NewCreateHandler(managerCreateTaskUseCase))
+	mux.Handle("GET /api/runner/manager/tasks/{uuid}", managerTaskAPI.NewShowHandler(managerGetTaskUseCase))
+	mux.Handle("DELETE /api/runner/manager/tasks/{uuid}", managerTaskAPI.NewDeleteHandler(managerDeleteTaskUseCase))
+	mux.Handle("POST /api/runner/manager/tasks/{uuid}/run", managerTaskAPI.NewRunHandler(managerRunTaskUseCase))
+	mux.Handle("POST /api/runner/manager/tasks/{uuid}/stop", managerTaskAPI.NewStopHandler(managerStopTaskUseCase))
+
+	mux.Handle("GET /api/runner/manager/nodes", managerNodeAPI.NewIndexHandler(managerGetNodesUseCase))
+	mux.Handle("GET /api/runner/manager/nodes/{name}", managerNodeAPI.NewShowHandler(managerGetNodeUseCase))
+
+	// runner/worker
+	mux.Handle("GET /api/runner/worker/tasks", workerTaskAPI.NewIndexHandler(workerGetTasksUseCase))
+	mux.Handle("POST /api/runner/worker/tasks/{uuid}/run", workerTaskAPI.NewRunHandler(workerRunTaskUseCase))
+	mux.Handle("POST /api/runner/worker/tasks/{uuid}/stop", workerTaskAPI.NewStopHandler(workerStopTaskUseCase))
 
 	return middleware.NewCORSMiddleware(middleware.NewRateLimitMiddleware(mux, 600, 1*time.Minute)), publishSubscriber.Wait
 }
